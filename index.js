@@ -37,6 +37,7 @@ const postcss_1 = __importDefault(require("postcss"));
 const postcssModules = __importStar(require("postcss-modules"));
 const sass = __importStar(require("sass"));
 const PLUGIN = "esbuild-scss-modules-plugin";
+const PLUGIN_CSS = `${PLUGIN}-css`;
 const DefaultOptions = {
     inject: true,
     minify: false,
@@ -78,7 +79,9 @@ async function buildScssModulesJS(scssFullPath, options) {
     const hash = crypto_1.default.createHash("sha256");
     hash.update(result.css);
     const digest = hash.digest("hex");
-    return `
+    const js = `
+    ${options.inject && `import "./${path_1.default.basename(scssFullPath)}?built";`}
+
 const digest = '${digest}';
 const classes = ${classNames};
 const css = \`${result.css}\`;
@@ -96,14 +99,17 @@ ${options.inject &&
 export default classes;
 export { css, digest, classes };
   `;
+    return { js, css: result.css };
 }
 const ScssModulesPlugin = (options = {}) => ({
     name: PLUGIN,
     setup(build) {
         const { outdir, bundle } = build.initialOptions;
         const results = new Map();
+        const transformCssResult = new Map();
         const fullOptions = { ...DefaultOptions, ...options };
-        build.onResolve({ filter: /\.modules?\.scss$/, namespace: "file" }, async (args) => {
+        build.onResolve({ filter: /\.modules?\.scss$/ }, async (args) => {
+            debugger;
             const sourceFullPath = path_1.default.resolve(args.resolveDir, args.path);
             if (results.has(sourceFullPath))
                 return results.get(sourceFullPath);
@@ -112,7 +118,7 @@ const ScssModulesPlugin = (options = {}) => ({
                 const sourceBaseName = path_1.default.basename(sourceFullPath, sourceExt);
                 if (bundle) {
                     return {
-                        path: args.path,
+                        path: sourceFullPath,
                         namespace: PLUGIN,
                         pluginData: {
                             sourceFullPath,
@@ -132,11 +138,11 @@ const ScssModulesPlugin = (options = {}) => ({
                         ? path_1.default.join(entryRelDir, `${sourceBaseName}.css.js`)
                         : `${sourceBaseName}.css.js`;
                     const target = path_1.default.resolve(absoluteOutdir, targetSubpath);
-                    const jsContent = await buildScssModulesJS(sourceFullPath, fullOptions);
+                    const { js } = await buildScssModulesJS(sourceFullPath, fullOptions);
                     await promises_1.default.mkdir(path_1.default.dirname(target), {
                         recursive: true,
                     });
-                    await promises_1.default.writeFile(target, jsContent);
+                    await promises_1.default.writeFile(target, js);
                 }
                 return { path: sourceFullPath, namespace: "file" };
             })();
@@ -144,11 +150,33 @@ const ScssModulesPlugin = (options = {}) => ({
                 results.set(sourceFullPath, result);
             return result;
         });
-        build.onLoad({ filter: /\.modules?\.scss$/, namespace: PLUGIN }, async ({ pluginData: { sourceFullPath } }) => {
-            const contents = await buildScssModulesJS(sourceFullPath, fullOptions);
+        build.onResolve({ filter: /\.modules?\.scss\?built$/, namespace: PLUGIN }, async (args) => {
+            const sourceFullPath = path_1.default.resolve(args.resolveDir, args.path);
             return {
-                contents,
+                path: args.path,
+                namespace: PLUGIN,
+                pluginData: {
+                    sourceFullPath: args.importer,
+                },
+            };
+        });
+        build.onLoad({ filter: /\.modules?\.scss$/, namespace: PLUGIN }, async ({ pluginData: { sourceFullPath }, }) => {
+            const { css, js } = await buildScssModulesJS(sourceFullPath, fullOptions);
+            transformCssResult.set(sourceFullPath, css);
+            return {
+                contents: js,
                 loader: "js",
+                watchFiles: [sourceFullPath],
+            };
+        });
+        build.onLoad({ filter: /\.modules?\.scss\?built$/, namespace: PLUGIN }, async ({ pluginData: { sourceFullPath }, }) => {
+            if (fullOptions.inject)
+                return undefined;
+            const key = sourceFullPath;
+            const css = transformCssResult.get(key);
+            return {
+                contents: css,
+                loader: "css",
                 watchFiles: [sourceFullPath],
             };
         });
